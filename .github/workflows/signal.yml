@@ -5,16 +5,22 @@ on:
     - cron: '0 12 * * 1-5'
   workflow_dispatch:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   signal:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v4.2.2
+
+      - uses: actions/setup-python@v5.4.0
         with:
           python-version: '3.11'
+
       - name: Kutubxonalar
         run: pip install requests pandas
+
       - name: Signal tahlili
         env:
           TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
