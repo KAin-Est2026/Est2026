@@ -24,8 +24,8 @@ TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 TWELVE_DATA_KEY  = os.environ["TWELVE_DATA_KEY"]
 
-# Minimum tasdiqlash soni (3 dan kam bo'lsa signal berilmaydi)
-MIN_CONFIRMATIONS = 3
+# Minimum tasdiqlash soni (2 dan kam bo'lsa signal berilmaydi)
+MIN_CONFIRMATIONS = 2
 
 SYMBOLS = [
     {"symbol": "XAU/USD", "name": "Oltin",   "type": "forex",  "pip": 0.10},
@@ -244,7 +244,7 @@ def analyze_symbol(item: dict) -> dict | None:
 
     # Faqat bir yo'nalish uchun tasdiqlashlarni hisoblash
     action_confs = [c for c in confirmations if c[1] == action]
-    if len(action_confs) < MIN_CONFIRMATIONS or score < 4:
+    if len(action_confs) < MIN_CONFIRMATIONS or score < 3:
         print(f"  {symbol}: zaif signal ({len(action_confs)} tasdiqlash, score={score}) — o'tkazib yuborildi")
         return None
 
@@ -335,6 +335,10 @@ def main():
 
     signals = []
 
+    # Boshlanganda ham xabar yuborsin
+    now_str = datetime.utcnow().strftime("%d.%m.%Y %H:%M UTC")
+    send_telegram(f"🔍 <b>Tahlil boshlandi — {now_str}</b>\nXAU/USD va BTC/USD tekshirilmoqda...")
+
     for item in SYMBOLS:
         print(f"\n[{item['symbol']}] tahlil boshlanmoqda...")
         try:
@@ -357,9 +361,8 @@ def main():
     if signals:
         signals.sort(key=lambda x: x["score"], reverse=True)
         header = (
-            f"📡 <b>KUNLIK TAHLIL — {now_str}</b>\n"
+            f"📡 <b>TAHLIL NATIJASI — {now_str}</b>\n"
             f"Topilgan signal: <b>{len(signals)} ta</b>\n"
-            f"Juftliklar: XAU/USD | BTC/USD | ETH/USD\n"
             f"{'─'*28}"
         )
         send_telegram(header)
@@ -369,14 +372,11 @@ def main():
             time.sleep(0.3)
     else:
         send_telegram(
-            f"📊 <b>Kunlik tahlil — {now_str}</b>\n\n"
-            f"Tekshirilgan juftliklar:\n"
-            f"• XAU/USD (Oltin)\n"
-            f"• BTC/USD (Bitcoin)\n"
-            f"• ETH/USD (Ethereum)\n\n"
-            f"Bugun aniq kirish signali topilmadi.\n"
-            f"Bozor hozir trend aniq emas — kutish tavsiya etiladi.\n\n"
-            f"⏰ Ertaga soat 17:00 da qayta tahlil qilinadi."
+            f"📊 <b>Tahlil natijasi — {now_str}</b>\n\n"
+            f"• XAU/USD — signal yo'q\n"
+            f"• BTC/USD — signal yo'q\n\n"
+            f"Bozor hozir kutish holatida.\n"
+            f"⏰ Keyingi tahlil 5 soatdan so'ng."
         )
 
     print("Tugadi.")
