@@ -1,33 +1,21 @@
-"""
-bot.py — Professional Sniper Signal Bot
-=======================================
+# """ bot.py — Sniper Signal Bot
 
 Timeframe:
   D1  → asosiy trend (EMA50/200)
-  H1  → trend tasdiqi (EMA20/50)
-  M15 → entry signal
+  H1  → oraliq trend (EMA20/50)
+  M15 → entry signal (EMA9/21 cross + MACD + Stochastic + Volume)
 
 Entry:
-  EMA9/21 Cross
-  + MACD Histogram
-  + Stochastic
-  + Volume Confirmation
+  EMA cross + MACD + Stochastic + Volume tasdiqi
 
 TP:
-  H1 swing level
-  D1 swing level
+  keyingi swing high/low
 
 SL:
-  So'nggi swing low/high
-
-Risk:
-  Minimum R/R = 1.5
+  so'nggi swing low/high
 """
 
-import os
-import time
-import requests
-import pandas as pd
+import os, time, requests, pandas as pd
 from datetime import datetime
 
 TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
@@ -35,29 +23,25 @@ TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 TWELVE_KEY       = os.environ["TWELVE_DATA_KEY"]
 
 SYMBOLS = [
-    {"symbol": "XAU/USD", "name": "Oltin", "type": "forex", "digits": 2},
+    {"symbol": "XAU/USD", "name": "Oltin",   "type": "forex",  "digits": 2},
     {"symbol": "BTC/USD", "name": "Bitcoin", "type": "crypto", "digits": 1},
 ]
 
-# ==========================================================
-# INDICATORS
-# ==========================================================
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
-def ema(series: pd.Series, period: int) -> pd.Series:
-    return series.ewm(span=period, adjust=False).mean()
+def ema(s: pd.Series, p: int) -> pd.Series:
+    return s.ewm(span=p, adjust=False).mean()
 
 
-def macd_histogram(close: pd.Series) -> pd.Series:
+def macd_histogram(close):
     ema12 = ema(close, 12)
     ema26 = ema(close, 26)
-
     macd = ema12 - ema26
     signal = macd.ewm(span=9, adjust=False).mean()
-
     return macd - signal
 
 
-def stochastic(df: pd.DataFrame, period: int = 14):
+def stochastic(df, period=14):
     low_min = df["low"].rolling(period).min()
     high_max = df["high"].rolling(period).max()
 
@@ -67,47 +51,41 @@ def stochastic(df: pd.DataFrame, period: int = 14):
     return float(k.iloc[-1]), float(d.iloc[-1])
 
 
-def swing_high(df: pd.DataFrame, n: int = 10) -> float:
+def swing_high(df: pd.DataFrame, n: int = 5) -> float:
     return float(df["high"].iloc[-n:].max())
 
 
-def swing_low(df: pd.DataFrame, n: int = 10) -> float:
+def swing_low(df: pd.DataFrame, n: int = 5) -> float:
     return float(df["low"].iloc[-n:].min())
 
 
-def prev_swing_high(df: pd.DataFrame, n: int = 30) -> float:
+def prev_swing_high(df: pd.DataFrame, n: int = 20) -> float:
     return float(df["high"].iloc[-n:-1].max())
 
 
-def prev_swing_low(df: pd.DataFrame, n: int = 30) -> float:
+def prev_swing_low(df: pd.DataFrame, n: int = 20) -> float:
     return float(df["low"].iloc[-n:-1].min())
 
 
-def volume_confirmation(df: pd.DataFrame) -> bool:
+def volume_ok(df):
     if "volume" not in df.columns:
         return True
-
-    try:
-        return df["volume"].iloc[-1] > df["volume"].tail(20).mean()
-    except:
-        return True
+    return df["volume"].iloc[-1] > df["volume"].tail(20).mean()
 
 
-# ==========================================================
-# API
-# ==========================================================
+# ── API ───────────────────────────────────────────────────────────────────────
 
-_last_call = 0
+_last = 0
 
 def _wait():
-    global _last_call
-    gap = time.time() - _last_call
+    global _last
+    gap = time.time() - _last
     if gap < 8:
         time.sleep(8 - gap)
-    _last_call = time.time()
+    _last = time.time()
 
 
-def get_price(symbol: str):
+def get_price(symbol: str) -> float | None:
     _wait()
     try:
         r = requests.get(
@@ -120,26 +98,21 @@ def get_price(symbol: str):
         return None
 
 
-def get_candles(symbol: str, interval: str, size: int = 100):
+def get_candles(symbol: str, interval: str, size: int = 100) -> pd.DataFrame | None:
     _wait()
     try:
         r = requests.get(
             "https://api.twelvedata.com/time_series",
-            params={
-                "symbol": symbol,
-                "interval": interval,
-                "outputsize": size,
-                "apikey": TWELVE_KEY
-            },
+            params={"symbol": symbol, "interval": interval,
+                    "outputsize": size, "apikey": TWELVE_KEY},
             timeout=15
         ).json()
 
         if "values" not in r:
             return None
 
-        df = pd.DataFrame(r["values"]).iloc[::-1]
-
-        for c in ["open", "high", "low", "close"]:
+        df = pd.DataFrame(r["values"]).iloc[::-1].reset_index(drop=True)
+        for c in ["open","high","low","close"]:
             df[c] = pd.to_numeric(df[c], errors="coerce")
 
         return df.dropna().reset_index(drop=True)
@@ -148,55 +121,54 @@ def get_candles(symbol: str, interval: str, size: int = 100):
         return None
 
 
-# ==========================================================
-# ANALYZE
-# ==========================================================
+# ── Tahlil ────────────────────────────────────────────────────────────────────
 
-def analyze(item: dict):
-
-    symbol = item["symbol"]
+def analyze(item: dict) -> dict | None:
+    sym    = item["symbol"]
     digits = item["digits"]
 
-    price = get_price(symbol)
+    price = get_price(sym)
     if price is None:
         return None
 
-    # D1 TREND
-    d1 = get_candles(symbol, "1day", 220)
-    if d1 is None:
+    # D1 trend
+    d1 = get_candles(sym, "1day", 220)
+    if d1 is None or len(d1) < 200:
         return None
 
-    ema50 = ema(d1["close"], 50).iloc[-1]
-    ema200 = ema(d1["close"], 200).iloc[-1]
+    e50_d1  = float(ema(d1["close"], 50).iloc[-1])
+    e200_d1 = float(ema(d1["close"], 200).iloc[-1])
 
-    if ema50 > ema200:
+    if e50_d1 > e200_d1 * 1.001:
         d1_trend = "BUY"
-    elif ema50 < ema200:
+    elif e50_d1 < e200_d1 * 0.999:
         d1_trend = "SELL"
     else:
         return None
 
-    # H1 CONFIRM
-    h1 = get_candles(symbol, "1h", 100)
+    # H1 confirm
+    h1 = get_candles(sym, "1h", 60)
     if h1 is None:
         return None
 
-    if d1_trend == "BUY" and ema(h1["close"], 20).iloc[-1] <= ema(h1["close"], 50).iloc[-1]:
+    e20_h1 = float(ema(h1["close"], 20).iloc[-1])
+    e50_h1 = float(ema(h1["close"], 50).iloc[-1])
+
+    if d1_trend == "BUY" and e20_h1 < e50_h1:
+        return None
+    if d1_trend == "SELL" and e20_h1 > e50_h1:
         return None
 
-    if d1_trend == "SELL" and ema(h1["close"], 20).iloc[-1] >= ema(h1["close"], 50).iloc[-1]:
-        return None
-
-    # M15 ENTRY
-    m15 = get_candles(symbol, "15min", 80)
+    # M15 entry
+    m15 = get_candles(sym, "15min", 60)
     if m15 is None:
         return None
 
-    ema9 = ema(m15["close"], 9)
-    ema21 = ema(m15["close"], 21)
+    e9  = ema(m15["close"], 9)
+    e21 = ema(m15["close"], 21)
 
-    cross_up = ema9.iloc[-2] < ema21.iloc[-2] and ema9.iloc[-1] >= ema21.iloc[-1]
-    cross_down = ema9.iloc[-2] > ema21.iloc[-2] and ema9.iloc[-1] <= ema21.iloc[-1]
+    cross_up = e9.iloc[-2] < e21.iloc[-2] and e9.iloc[-1] >= e21.iloc[-1]
+    cross_down = e9.iloc[-2] > e21.iloc[-2] and e9.iloc[-1] <= e21.iloc[-1]
 
     action = d1_trend
 
@@ -209,41 +181,39 @@ def analyze(item: dict):
     hist = macd_histogram(m15["close"])
     k, d = stochastic(m15)
 
-    macd_bull = hist.iloc[-1] > 0 and hist.iloc[-1] > hist.iloc[-2]
-    macd_bear = hist.iloc[-1] < 0 and hist.iloc[-1] < hist.iloc[-2]
+    macd_buy = hist.iloc[-1] > 0 and hist.iloc[-1] > hist.iloc[-2]
+    macd_sell = hist.iloc[-1] < 0 and hist.iloc[-1] < hist.iloc[-2]
 
-    stoch_bull = k > d and k < 30
-    stoch_bear = k < d and k > 70
+    stoch_buy = k > d and k < 30
+    stoch_sell = k < d and k > 70
 
-    vol_ok = volume_confirmation(m15)
+    vol = volume_ok(m15)
 
     if action == "BUY":
-        if not (macd_bull and stoch_bull and vol_ok):
+        if not (macd_buy and stoch_buy and vol):
             return None
     else:
-        if not (macd_bear and stoch_bear and vol_ok):
+        if not (macd_sell and stoch_sell and vol):
             return None
 
     # SL
     if action == "BUY":
-        sl = swing_low(m15) * 0.999
+        sl = round(swing_low(m15, n=10) - (price * 0.001), digits)
     else:
-        sl = swing_high(m15) * 1.001
+        sl = round(swing_high(m15, n=10) + (price * 0.001), digits)
 
-    sl = round(sl, digits)
+    sl_dist = abs(price - sl)
+    if sl_dist == 0:
+        return None
 
     # TP
     if action == "BUY":
-        tp1 = prev_swing_high(h1)
-        tp2 = prev_swing_high(d1)
+        tp1 = round(prev_swing_high(h1, n=30), digits)
+        tp2 = round(prev_swing_high(d1, n=20), digits)
     else:
-        tp1 = prev_swing_low(h1)
-        tp2 = prev_swing_low(d1)
+        tp1 = round(prev_swing_low(h1, n=30), digits)
+        tp2 = round(prev_swing_low(d1, n=20), digits)
 
-    tp1 = round(tp1, digits)
-    tp2 = round(tp2, digits)
-
-    sl_dist = abs(price - sl)
     rr1 = abs(tp1 - price) / sl_dist if sl_dist else 0
 
     if rr1 < 1.5:
@@ -260,46 +230,43 @@ def analyze(item: dict):
         "macd": float(hist.iloc[-1]),
         "stoch_k": k,
         "stoch_d": d,
+        "volume_ok": vol,
         "d1_trend": d1_trend
     }
 
 
-# ==========================================================
-# TELEGRAM
-# ==========================================================
+# ── Telegram ──────────────────────────────────────────────────────────────────
 
-def send(msg):
-    requests.post(
-        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-        data={
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": msg,
-            "parse_mode": "HTML"
-        }
-    )
-
-
-def format_msg(s):
-
+def format_msg(s: dict) -> str:
     e = "🟢" if s["action"] == "BUY" else "🔴"
+    act = "SOTIB OL" if s["action"] == "BUY" else "SOT"
+    now = datetime.utcnow().strftime("%d.%m.%Y %H:%M UTC")
+    d = s["digits"]
 
     return (
-        f"{e} <b>{s['symbol']} — {s['action']}</b>\n\n"
-        f"Entry: {s['price']}\n"
-        f"TP1: {s['tp1']} | TP2: {s['tp2']}\n"
-        f"SL: {s['sl']}\n\n"
-        f"MACD: {round(s['macd'],4)}\n"
-        f"Stoch: {round(s['stoch_k'],1)} / {round(s['stoch_d'],1)}\n"
-        f"D1: {s['d1_trend']}"
+        f"{e} <b>{s['symbol']} — {act}</b>\n"
+        f"<i>{s['name']}</i>\n\n"
+        f"💰 Entry: <b>{s['price']:.{d}f}</b>\n"
+        f"🎯 TP1: <b>{s['tp1']:.{d}f}</b> (R/R 1:{s['rr1']})\n"
+        f"🎯 TP2: <b>{s['tp2']:.{d}f}</b>\n"
+        f"🛑 SL: <b>{s['sl']:.{d}f}</b>\n\n"
+        f"📊 MACD: {round(s['macd'],4)}\n"
+        f"📈 Stoch: {round(s['stoch_k'],1)} / {round(s['stoch_d'],1)}\n"
+        f"📦 Volume: {'OK' if s['volume_ok'] else 'NO'}\n"
+        f"📉 D1 Trend: {s['d1_trend']}\n"
     )
 
 
-# ==========================================================
-# MAIN LOOP
-# ==========================================================
+def send(msg: str):
+    requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+        data={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"},
+    )
+
+
+# ── MAIN ─────────────────────────────────────────────────────────────────────
 
 def main():
-
     send("🔍 Bot Started")
 
     signals = []
@@ -316,12 +283,8 @@ def main():
     else:
         send("No signal")
 
+
 if __name__ == "__main__":
-
     while True:
-        try:
-            main()
-        except Exception as e:
-            print(e)
-
+        main()
         time.sleep(4 * 60 * 60)
