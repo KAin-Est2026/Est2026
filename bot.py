@@ -1,22 +1,13 @@
 """
-bot.py — Sniper Scalping Bot
-Har 3-4 soatda ishga tushadi (cron: 0 */4 * * *)
-
-Timeframe:
-  D1  → asosiy trend
-  H1  → oraliq trend
-  M15 → entry
-
-Indikatorlar:
-  EMA 50/200 (D1 trend)
-  EMA 20/50  (H1 trend)
-  EMA 9/21   (M15 crossover)
-  MACD       (momentum)
-  Stochastic (entry tasdiqi)
-  Volume     (kuch tasdiqi)
-
-TP: keyingi swing high/low
-SL: so'nggi swing low/high
+bot.py — XAU/USD Sniper Scalping Bot
+======================================
+Tahlil:  H4 (trend) + H1 (zona)
+Entry:   M15 + M5 (EMA9/21 crossover)
+SL:      0.7 × ATR (M15)
+TP1:     H1 swing high/low
+TP2:     H4 swing high/low
+TP3:     H4 keyingi kuchli level
+Cron:    0 */4 * * * python3 bot.py
 """
 
 import os, time, requests, pandas as pd
@@ -26,25 +17,56 @@ TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 TWELVE_KEY       = os.environ["TWELVE_DATA_KEY"]
 
-SYMBOLS = [
-    {"symbol": "XAU/USD", "name": "Oltin",   "type": "forex",  "digits": 2},
-    {"symbol": "BTC/USD", "name": "Bitcoin", "type": "crypto", "digits": 1},
-]
+SYMBOL = "XAU/USD"
+DIGITS = 2
 
 # ── Indikatorlar ──────────────────────────────────────────────────────────────
 
 def ema(s: pd.Series, p: int) -> pd.Series:
     return s.ewm(span=p, adjust=False).mean()
 
+def atr(df: pd.DataFrame, p: int = 14) -> float:
+    tr = pd.concat([
+        df["high"] - df["low"],
+        (df["high"] - df["close"].shift()).abs(),
+        (df["low"]  - df["close"].shift()).abs(),
+    ], axis=1).max(axis=1)
+    val = tr.rolling(p).mean().dropna()
+    return float(val.iloc[-1]) if len(val) > 0 else 1.0
+
 def macd_hist(s: pd.Series) -> pd.Series:
     m = ema(s, 12) - ema(s, 26)
     return m - ema(m, 9)
 
-def stochastic(df: pd.DataFrame, k=14, d=3):
-    lo = df["low"].rolling(k).min()
-    hi = df["high"].rolling(k).max()
-    k_line = 100 * (df["close"] - lo) / (hi - lo).replace(0, 1e-10)
-    return k_line, k_line.rolling(d).mean()
+def swing_highs(df: pd.DataFrame, n: int = 3) -> list:
+    """Swing high levellarni topish — har tomonida n ta bar past bo'lishi kerak"""
+    levels = []
+    for i in range(n, len(df) - n):
+        h = df["high"].iloc[i]
+        if all(h > df["high"].iloc[i-j] for j in range(1, n+1)) and \
+           all(h > df["high"].iloc[i+j] for j in range(1, n+1)):
+            levels.append(h)
+    return sorted(set(round(x, DIGITS) for x in levels))
+
+def swing_lows(df: pd.DataFrame, n: int = 3) -> list:
+    """Swing low levellarni topish"""
+    levels = []
+    for i in range(n, len(df) - n):
+        l = df["low"].iloc[i]
+        if all(l < df["low"].iloc[i-j] for j in range(1, n+1)) and \
+           all(l < df["low"].iloc[i+j] for j in range(1, n+1)):
+            levels.append(l)
+    return sorted(set(round(x, DIGITS) for x in levels))
+
+def next_level_above(levels: list, price: float) -> float | None:
+    """Narxdan yuqoridagi eng yaqin level"""
+    above = [l for l in levels if l > price * 1.0005]
+    return min(above) if above else None
+
+def next_level_below(levels: list, price: float) -> float | None:
+    """Narxdan pastdagi eng yaqin level"""
+    below = [l for l in levels if l < price * 0.9995]
+    return max(below) if below else None
 
 # ── API ───────────────────────────────────────────────────────────────────────
 
@@ -57,25 +79,25 @@ def _wait():
         time.sleep(8 - gap)
     _last = time.time()
 
-def get_price(symbol: str) -> float | None:
+def get_price() -> float | None:
     _wait()
     try:
         r = requests.get(
             "https://api.twelvedata.com/price",
-            params={"symbol": symbol, "apikey": TWELVE_KEY},
+            params={"symbol": SYMBOL, "apikey": TWELVE_KEY},
             timeout=10
         ).json()
         return float(r["price"]) if "price" in r else None
     except:
         return None
 
-def get_candles(symbol: str, interval: str, size: int) -> pd.DataFrame | None:
+def get_candles(interval: str, size: int) -> pd.DataFrame | None:
     _wait()
     try:
         r = requests.get(
             "https://api.twelvedata.com/time_series",
             params={
-                "symbol":     symbol,
+                "symbol":     SYMBOL,
                 "interval":   interval,
                 "outputsize": size,
                 "apikey":     TWELVE_KEY,
@@ -83,177 +105,186 @@ def get_candles(symbol: str, interval: str, size: int) -> pd.DataFrame | None:
             timeout=15
         ).json()
         if "values" not in r:
-            print(f"  [{symbol}/{interval}] {r.get('message','?')}")
+            print(f"  [{interval}] {r.get('message','?')}")
             return None
         df = pd.DataFrame(r["values"]).iloc[::-1].reset_index(drop=True)
         for c in ["open", "high", "low", "close"]:
             df[c] = pd.to_numeric(df[c], errors="coerce")
-        df["volume"] = pd.to_numeric(
-            df["volume"] if "volume" in df.columns else 0,
-            errors="coerce"
-        ).fillna(0)
         return df.dropna(subset=["open","high","low","close"]).reset_index(drop=True)
     except Exception as e:
-        print(f"  [{symbol}/{interval}] {e}")
+        print(f"  [{interval}] {e}")
         return None
 
 # ── Tahlil ────────────────────────────────────────────────────────────────────
 
-def analyze(item: dict) -> dict | None:
-    sym    = item["symbol"]
-    digits = item["digits"]
+def analyze() -> dict | None:
 
-    # ── Real narx ─────────────────────────────────────────────────────────────
-    price = get_price(sym)
+    # Real narx
+    price = get_price()
     if price is None:
-        print(f"  [{sym}] narx olinmadi")
+        print("  Narx olinmadi")
         return None
-    print(f"  [{sym}] Narx: {price}")
+    print(f"  Narx: {price}")
 
-    # ── D1: asosiy trend ──────────────────────────────────────────────────────
-    d1 = get_candles(sym, "1day", 220)
-    if d1 is None or len(d1) < 200:
-        print(f"  [{sym}] D1 yetarli emas")
+    # ── H4: asosiy trend ──────────────────────────────────────────────────────
+    h4 = get_candles("4h", 250)
+    if h4 is None or len(h4) < 200:
+        print("  H4 yetarli emas")
         return None
 
-    e50_d1  = float(ema(d1["close"], 50).iloc[-1])
-    e200_d1 = float(ema(d1["close"], 200).iloc[-1])
+    e50_h4  = float(ema(h4["close"], 50).iloc[-1])
+    e200_h4 = float(ema(h4["close"], 200).iloc[-1])
 
-    if e50_d1 > e200_d1 * 1.001:
+    if e50_h4 > e200_h4 * 1.001:
         trend = "BUY"
-    elif e50_d1 < e200_d1 * 0.999:
+    elif e50_h4 < e200_h4 * 0.999:
         trend = "SELL"
     else:
-        print(f"  [{sym}] D1 trend aniq emas")
+        print("  H4 trend aniq emas")
         return None
 
-    # ── H1: oraliq trend ──────────────────────────────────────────────────────
-    h1 = get_candles(sym, "1h", 60)
+    print(f"  H4 trend: {trend}")
+
+    # ── H1: zona tasdiqi ──────────────────────────────────────────────────────
+    h1 = get_candles("1h", 100)
     if h1 is None or len(h1) < 50:
-        print(f"  [{sym}] H1 yetarli emas")
+        print("  H1 yetarli emas")
         return None
 
-    e20_h1 = float(ema(h1["close"], 20).iloc[-1])
-    e50_h1 = float(ema(h1["close"], 50).iloc[-1])
+    e50_h1    = float(ema(h1["close"], 50).iloc[-1])
+    price_h1  = float(h1["close"].iloc[-1])
 
-    if trend == "BUY"  and e20_h1 < e50_h1:
-        print(f"  [{sym}] H1 D1 ga zid")
+    if trend == "BUY"  and price_h1 < e50_h1:
+        print("  H1: narx EMA50 ostida — BUY o'tkazildi")
         return None
-    if trend == "SELL" and e20_h1 > e50_h1:
-        print(f"  [{sym}] H1 D1 ga zid")
+    if trend == "SELL" and price_h1 > e50_h1:
+        print("  H1: narx EMA50 ustida — SELL o'tkazildi")
         return None
 
-    # ── M15: entry signali ────────────────────────────────────────────────────
-    m15 = get_candles(sym, "15min", 60)
+    # ── M15: entry ────────────────────────────────────────────────────────────
+    m15 = get_candles("15min", 60)
     if m15 is None or len(m15) < 40:
-        print(f"  [{sym}] M15 yetarli emas")
+        print("  M15 yetarli emas")
         return None
 
-    e9  = ema(m15["close"], 9)
-    e21 = ema(m15["close"], 21)
+    e9_m15  = ema(m15["close"], 9)
+    e21_m15 = ema(m15["close"], 21)
 
-    # EMA crossover — so'nggi 3 barda
-    cross_up = any(
-        e9.iloc[i-1] < e21.iloc[i-1] and e9.iloc[i] >= e21.iloc[i]
-        for i in range(-3, 0)
+    cross_up_m15 = any(
+        e9_m15.iloc[i-1] < e21_m15.iloc[i-1] and e9_m15.iloc[i] >= e21_m15.iloc[i]
+        for i in range(-5, 0)
     )
-    cross_down = any(
-        e9.iloc[i-1] > e21.iloc[i-1] and e9.iloc[i] <= e21.iloc[i]
-        for i in range(-3, 0)
+    cross_down_m15 = any(
+        e9_m15.iloc[i-1] > e21_m15.iloc[i-1] and e9_m15.iloc[i] <= e21_m15.iloc[i]
+        for i in range(-5, 0)
     )
 
-    if trend == "BUY"  and not cross_up:
-        print(f"  [{sym}] M15 BUY cross yo'q")
-        return None
-    if trend == "SELL" and not cross_down:
-        print(f"  [{sym}] M15 SELL cross yo'q")
+    # ── M5: sniper entry ──────────────────────────────────────────────────────
+    m5 = get_candles("5min", 60)
+    if m5 is None or len(m5) < 30:
+        print("  M5 yetarli emas")
         return None
 
-    # ── MACD tasdiqi ──────────────────────────────────────────────────────────
-    hist   = macd_hist(m15["close"])
-    h_now  = float(hist.iloc[-1])
-    h_prev = float(hist.iloc[-2])
+    e9_m5  = ema(m5["close"], 9)
+    e21_m5 = ema(m5["close"], 21)
+
+    cross_up_m5 = any(
+        e9_m5.iloc[i-1] < e21_m5.iloc[i-1] and e9_m5.iloc[i] >= e21_m5.iloc[i]
+        for i in range(-4, 0)
+    )
+    cross_down_m5 = any(
+        e9_m5.iloc[i-1] > e21_m5.iloc[i-1] and e9_m5.iloc[i] <= e21_m5.iloc[i]
+        for i in range(-4, 0)
+    )
 
     if trend == "BUY":
-        macd_ok = h_now > 0 or (h_now > h_prev)
+        m15_ok = cross_up_m15
+        m5_ok  = cross_up_m5
     else:
-        macd_ok = h_now < 0 or (h_now < h_prev)
+        m15_ok = cross_down_m15
+        m5_ok  = cross_down_m5
 
-    if not macd_ok:
-        print(f"  [{sym}] MACD tasdiqlamadi")
+    if not m15_ok and not m5_ok:
+        print("  M15 va M5 cross yo'q")
         return None
 
-    # ── Stochastic tasdiqi ────────────────────────────────────────────────────
-    k_line, d_line = stochastic(m15)
-    k_now  = float(k_line.iloc[-1])
-    d_now  = float(d_line.iloc[-1])
-    k_prev = float(k_line.iloc[-2])
-    d_prev = float(d_line.iloc[-2])
+    entry_tf = "M15" if m15_ok else "M5"
+
+    # ── MACD tasdiqi (M15) ────────────────────────────────────────────────────
+    hist  = macd_hist(m15["close"])
+    h_now = float(hist.iloc[-1])
+    h_prv = float(hist.iloc[-2])
+
+    if trend == "BUY"  and not (h_now > 0 or h_now > h_prv):
+        print("  MACD BUY tasdiqlamadi")
+        return None
+    if trend == "SELL" and not (h_now < 0 or h_now < h_prv):
+        print("  MACD SELL tasdiqlamadi")
+        return None
+
+    # ── SL: 0.7 × ATR (M15) ──────────────────────────────────────────────────
+    atr_m15 = atr(m15, 14)
+    sl_dist = round(atr_m15 * 0.7, DIGITS)
 
     if trend == "BUY":
-        # %K pastdan yuqoriga %D ni kesdi va overbought emas
-        stoch_ok = (k_prev <= d_prev and k_now > d_now) and k_now < 80
+        sl = round(price - sl_dist, DIGITS)
     else:
-        # %K yuqoridan pastga %D ni kesdi va oversold emas
-        stoch_ok = (k_prev >= d_prev and k_now < d_now) and k_now > 20
+        sl = round(price + sl_dist, DIGITS)
 
-    if not stoch_ok:
-        print(f"  [{sym}] Stochastic tasdiqlamadi (K={k_now:.1f})")
-        return None
+    # ── TP: haqiqiy swing levellar ────────────────────────────────────────────
+    h1_highs = swing_highs(h1, n=3)
+    h1_lows  = swing_lows(h1,  n=3)
+    h4_highs = swing_highs(h4, n=3)
+    h4_lows  = swing_lows(h4,  n=3)
 
-    # ── Volume tasdiqi ────────────────────────────────────────────────────────
-    vol_now  = float(m15["volume"].iloc[-1])
-    vol_avg  = float(m15["volume"].iloc[-20:].mean())
-    vol_ok   = vol_avg == 0 or vol_now >= vol_avg * 0.8
-
-    if not vol_ok:
-        print(f"  [{sym}] Volume juda past")
-        return None
-
-    vol_x = f"{vol_now/vol_avg:.1f}x" if vol_avg > 0 else "—"
-
-    # ── SL ────────────────────────────────────────────────────────────────────
     if trend == "BUY":
-        sl = round(float(m15["low"].iloc[-15:].min()) - price * 0.0003, digits)
+        tp1 = next_level_above(h1_highs, price)
+        tp2 = next_level_above(h4_highs, price)
+        # TP3: H4 dan ikkinchi level
+        h4_above = sorted([l for l in h4_highs if l > price * 1.0005])
+        tp3 = h4_above[1] if len(h4_above) >= 2 else None
+
+        # Fallback: swing topilmasa ATR ishlatish
+        if tp1 is None: tp1 = round(price + atr_m15 * 2.0, DIGITS)
+        if tp2 is None: tp2 = round(price + atr_m15 * 3.0, DIGITS)
+        if tp3 is None: tp3 = round(price + atr_m15 * 4.0, DIGITS)
+
+        # Tartib: tp1 < tp2 < tp3
+        tp1 = min(tp1, tp2, tp3)
+        tp3 = max(tp1, tp2, tp3)
+        tp2 = sorted([tp1, tp2, tp3])[1]
+
     else:
-        sl = round(float(m15["high"].iloc[-15:].max()) + price * 0.0003, digits)
+        tp1 = next_level_below(h1_lows, price)
+        tp2 = next_level_below(h4_lows, price)
+        h4_below = sorted([l for l in h4_lows if l < price * 0.9995], reverse=True)
+        tp3 = h4_below[1] if len(h4_below) >= 2 else None
 
-    sl_dist = abs(price - sl)
-    if sl_dist == 0:
-        return None
+        if tp1 is None: tp1 = round(price - atr_m15 * 2.0, DIGITS)
+        if tp2 is None: tp2 = round(price - atr_m15 * 3.0, DIGITS)
+        if tp3 is None: tp3 = round(price - atr_m15 * 4.0, DIGITS)
 
-    # ── TP — swing level ──────────────────────────────────────────────────────
-    if trend == "BUY":
-        tp1_raw = float(h1["high"].iloc[-30:].max())
-        tp2_raw = float(d1["high"].iloc[-20:].max())
-        tp1 = round(tp1_raw if tp1_raw > price * 1.001 else price + sl_dist * 2.0, digits)
-        tp2 = round(tp2_raw if tp2_raw > tp1  else price + sl_dist * 3.0, digits)
-    else:
-        tp1_raw = float(h1["low"].iloc[-30:].min())
-        tp2_raw = float(d1["low"].iloc[-20:].min())
-        tp1 = round(tp1_raw if tp1_raw < price * 0.999 else price - sl_dist * 2.0, digits)
-        tp2 = round(tp2_raw if tp2_raw < tp1  else price - sl_dist * 3.0, digits)
+        tp1 = max(tp1, tp2, tp3)
+        tp3 = min(tp1, tp2, tp3)
+        tp2 = sorted([tp1, tp2, tp3], reverse=True)[1]
 
-    rr1 = round(abs(tp1 - price) / sl_dist, 2)
-    rr2 = round(abs(tp2 - price) / sl_dist, 2)
-
-    if rr1 < 1.5:
-        print(f"  [{sym}] R/R yetarli emas: {rr1}")
-        return None
+    # R/R hisoblash
+    def rr(tp):
+        return round(abs(tp - price) / sl_dist, 1) if sl_dist > 0 else 0
 
     return {
-        **item,
-        "action": trend,
-        "price":  round(price, digits),
-        "sl":     sl,
-        "tp1":    tp1,
-        "tp2":    tp2,
-        "rr1":    rr1,
-        "rr2":    rr2,
-        "k_now":  round(k_now, 1),
-        "d_now":  round(d_now, 1),
-        "macd_h": round(h_now, 4),
-        "vol_x":  vol_x,
+        "action":   trend,
+        "price":    round(price, DIGITS),
+        "sl":       sl,
+        "tp1":      tp1,
+        "tp2":      tp2,
+        "tp3":      tp3,
+        "rr1":      rr(tp1),
+        "rr2":      rr(tp2),
+        "rr3":      rr(tp3),
+        "atr":      round(atr_m15, DIGITS),
+        "entry_tf": entry_tf,
+        "macd":     round(h_now, 4),
     }
 
 # ── Telegram ──────────────────────────────────────────────────────────────────
@@ -261,23 +292,21 @@ def analyze(item: dict) -> dict | None:
 def format_msg(s: dict) -> str:
     e   = "🟢" if s["action"] == "BUY" else "🔴"
     act = "SOTIB OL" if s["action"] == "BUY" else "SOT"
-    te  = "💱" if s["type"] == "forex" else "🪙"
     now = datetime.utcnow().strftime("%d.%m.%Y %H:%M UTC")
-    d   = s["digits"]
+    tr  = "📈 Uptrend" if s["action"] == "BUY" else "📉 Downtrend"
 
     return (
-        f"{e} <b>{s['symbol']} — {act}</b> {te}\n"
-        f"<i>{s['name']}</i>\n\n"
-        f"💰 Entry:  <b>{s['price']:.{d}f}</b>\n"
-        f"🎯 TP1:   <b>{s['tp1']:.{d}f}</b>  (1:{s['rr1']})\n"
-        f"🎯 TP2:   <b>{s['tp2']:.{d}f}</b>  (1:{s['rr2']})\n"
-        f"🛑 SL:    <b>{s['sl']:.{d}f}</b>\n\n"
-        f"✅ D1 trend: {'Uptrend' if s['action']=='BUY' else 'Downtrend'}\n"
-        f"✅ H1 trend mos\n"
-        f"✅ M15 EMA9/21 kesdi\n"
-        f"✅ MACD: {s['macd_h']}\n"
-        f"✅ Stoch: K={s['k_now']} D={s['d_now']}\n"
-        f"✅ Volume: {s['vol_x']}\n\n"
+        f"{e} <b>XAU/USD — {act}</b> 🥇\n"
+        f"<i>Oltin</i>\n\n"
+        f"💰 Entry:  <b>{s['price']:.2f}</b>\n"
+        f"🎯 TP1:   <b>{s['tp1']:.2f}</b>  (1:{s['rr1']}R)\n"
+        f"🎯 TP2:   <b>{s['tp2']:.2f}</b>  (1:{s['rr2']}R)\n"
+        f"🎯 TP3:   <b>{s['tp3']:.2f}</b>  (1:{s['rr3']}R)\n"
+        f"🛑 SL:    <b>{s['sl']:.2f}</b>  (0.7R | ATR:{s['atr']})\n\n"
+        f"✅ H4 {tr}\n"
+        f"✅ H1 narx EMA50 {'ustida' if s['action']=='BUY' else 'ostida'}\n"
+        f"✅ {s['entry_tf']} EMA9/21 kesdi\n"
+        f"✅ MACD: {s['macd']}\n\n"
         f"⏰ {now}\n"
         f"⚠️ Risk: 1-2%"
     )
@@ -297,38 +326,30 @@ def send(msg: str):
 
 def main():
     now = datetime.utcnow().strftime("%d.%m.%Y %H:%M UTC")
-    print(f"\n{'='*45}\nBot: {now}\n{'='*45}")
+    print(f"\n{'='*40}\nXAU/USD Bot: {now}\n{'='*40}")
 
-    signals = []
-
-    for item in SYMBOLS:
-        print(f"\n[{item['symbol']}]")
-        try:
-            res = analyze(item)
-            if res:
-                signals.append(res)
-                print(f"  ✓ {res['action']} | Entry:{res['price']} TP1:{res['tp1']} SL:{res['sl']} R/R:1:{res['rr1']}")
-            else:
-                print("  — Signal yo'q")
-        except Exception as e:
-            print(f"  XATO: {e}")
-            import traceback; traceback.print_exc()
-
-    now = datetime.utcnow().strftime("%d.%m.%Y %H:%M UTC")
-
-    if signals:
-        for s in signals:
-            send(format_msg(s))
-            time.sleep(0.5)
-    else:
-        send(
-            f"📊 <b>{now}</b>\n\n"
-            f"Hozircha signal yo'q.\n"
-            f"⏰ Keyingi tekshiruv 4 soatdan so'ng."
-        )
+    try:
+        res = analyze()
+        if res:
+            print(
+                f"\n✓ {res['action']} | "
+                f"Entry:{res['price']} | "
+                f"TP1:{res['tp1']} TP2:{res['tp2']} TP3:{res['tp3']} | "
+                f"SL:{res['sl']}"
+            )
+            send(format_msg(res))
+        else:
+            now = datetime.utcnow().strftime("%d.%m.%Y %H:%M UTC")
+            send(
+                f"📊 <b>XAU/USD — {now}</b>\n\n"
+                f"Signal yo'q.\n"
+                f"⏰ Keyingi tekshiruv 4 soatdan so'ng."
+            )
+    except Exception as e:
+        print(f"XATO: {e}")
+        import traceback; traceback.print_exc()
 
     print("\nTugadi.")
-
 
 if __name__ == "__main__":
     main()
