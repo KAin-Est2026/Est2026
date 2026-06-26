@@ -137,67 +137,115 @@ def fetch_klines(symbol: str, interval: str = INTERVAL, limit: int = LIMIT):
 # =========================
 
 def analyze(symbol: str) -> str:
-    df = fetch_klines(symbol, INTERVAL, LIMIT)
-    if df is None or len(df) < 30:
-        return f"*{symbol}*\n❌ Ma'lumot yetarli emas"
+    # ── H4: asosiy trend ──────────────────────────────────────────────────────
+    h4 = fetch_klines(symbol, "4h", 250)
+    if h4 is None or len(h4) < 200:
+        return f"*{symbol}*\n❌ H4 ma'lumot yetarli emas"
 
-    close_prices = df["close"].tolist()
-    last_price   = close_prices[-1]
+    e50_h4  = float(ema_series(h4["close"], 50).iloc[-1])
+    e200_h4 = float(ema_series(h4["close"], 200).iloc[-1])
 
-    # ── Asl logika (o'zgartirilmagan) ────────────────────────────────────────
-    e9  = ema(close_prices, 9)
-    e21 = ema(close_prices, 21)
-    last_ema9  = e9[-1]
-    last_ema21 = e21[-1]
-
-    last_rsi = rsi(close_prices)
-
-    e12 = ema(close_prices, 12)
-    e26 = ema(close_prices, 26)
-    macd_line = e12[-1] - e26[-1]
-
-    if last_ema9 > last_ema21 and last_rsi < 70 and macd_line > 0:
-        signal = "BUY"
-    elif last_ema9 < last_ema21 and last_rsi > 30 and macd_line < 0:
-        signal = "SELL"
+    if e50_h4 > e200_h4 * 1.001:
+        trend = "BUY"
+    elif e50_h4 < e200_h4 * 0.999:
+        trend = "SELL"
     else:
-        return (
-            f"*{symbol}*\n"
-            f"Signal: ⚪ NO SIGNAL\n"
-            f"Price: {last_price:.{DIGITS}f}\n"
-            f"RSI: {last_rsi:.2f} | MACD: {macd_line:.2f}"
-        )
+        return f"*{symbol}*\nSignal: ⚪ NO SIGNAL\nH4 trend aniq emas"
 
-    # ── Qo'shimcha hisob-kitoblar ─────────────────────────────────────────────
-    atr_val  = atr(df, 14)
-    sl_dist  = round(atr_val * 0.7, DIGITS)
+    # ── H1: zona tasdiqi ──────────────────────────────────────────────────────
+    h1 = fetch_klines(symbol, "1h", 100)
+    if h1 is None or len(h1) < 50:
+        return f"*{symbol}*\n❌ H1 ma'lumot yetarli emas"
 
-    if signal == "BUY":
-        sl = round(last_price - sl_dist, DIGITS)
-    else:
-        sl = round(last_price + sl_dist, DIGITS)
+    e50_h1   = float(ema_series(h1["close"], 50).iloc[-1])
+    price_h1 = float(h1["close"].iloc[-1])
 
-    # Swing levellardan TP
-    highs = swing_highs(df, n=3)
-    lows  = swing_lows(df,  n=3)
+    if trend == "BUY"  and price_h1 < e50_h1:
+        return f"*{symbol}*\nSignal: ⚪ NO SIGNAL\nH1: narx EMA50 ostida"
+    if trend == "SELL" and price_h1 > e50_h1:
+        return f"*{symbol}*\nSignal: ⚪ NO SIGNAL\nH1: narx EMA50 ustida"
 
-    if signal == "BUY":
-        tp1 = next_level_above(highs, last_price)
-        tp2_candidates = sorted([l for l in highs if l > last_price * 1.0005])
-        tp2 = tp2_candidates[1] if len(tp2_candidates) >= 2 else None
-        tp3 = tp2_candidates[2] if len(tp2_candidates) >= 3 else None
+    # ── M15: entry ────────────────────────────────────────────────────────────
+    m15 = fetch_klines(symbol, "15m", 60)
+    if m15 is None or len(m15) < 40:
+        return f"*{symbol}*\n❌ M15 ma'lumot yetarli emas"
+
+    e9_m15  = ema_series(m15["close"], 9)
+    e21_m15 = ema_series(m15["close"], 21)
+
+    cross_up_m15 = any(
+        e9_m15.iloc[i-1] < e21_m15.iloc[i-1] and e9_m15.iloc[i] >= e21_m15.iloc[i]
+        for i in range(-5, 0)
+    )
+    cross_down_m15 = any(
+        e9_m15.iloc[i-1] > e21_m15.iloc[i-1] and e9_m15.iloc[i] <= e21_m15.iloc[i]
+        for i in range(-5, 0)
+    )
+
+    # ── M5: sniper entry ──────────────────────────────────────────────────────
+    m5 = fetch_klines(symbol, "5m", 60)
+    if m5 is None or len(m5) < 30:
+        return f"*{symbol}*\n❌ M5 ma'lumot yetarli emas"
+
+    e9_m5  = ema_series(m5["close"], 9)
+    e21_m5 = ema_series(m5["close"], 21)
+
+    cross_up_m5 = any(
+        e9_m5.iloc[i-1] < e21_m5.iloc[i-1] and e9_m5.iloc[i] >= e21_m5.iloc[i]
+        for i in range(-4, 0)
+    )
+    cross_down_m5 = any(
+        e9_m5.iloc[i-1] > e21_m5.iloc[i-1] and e9_m5.iloc[i] <= e21_m5.iloc[i]
+        for i in range(-4, 0)
+    )
+
+    m15_ok = cross_up_m15 if trend == "BUY" else cross_down_m15
+    m5_ok  = cross_up_m5  if trend == "BUY" else cross_down_m5
+
+    if not m15_ok and not m5_ok:
+        return f"*{symbol}*\nSignal: ⚪ NO SIGNAL\nM15 va M5 cross yo'q"
+
+    entry_tf = "M15" if m15_ok else "M5"
+
+    # ── MACD tasdiqi (M15) ────────────────────────────────────────────────────
+    hist  = macd_hist(m15["close"])
+    h_now = float(hist.iloc[-1])
+    h_prv = float(hist.iloc[-2])
+
+    if trend == "BUY"  and not (h_now > 0 or h_now > h_prv):
+        return f"*{symbol}*\nSignal: ⚪ NO SIGNAL\nMACD BUY tasdiqlamadi"
+    if trend == "SELL" and not (h_now < 0 or h_now < h_prv):
+        return f"*{symbol}*\nSignal: ⚪ NO SIGNAL\nMACD SELL tasdiqlamadi"
+
+    # ── Narx, ATR, SL ─────────────────────────────────────────────────────────
+    last_price = float(m15["close"].iloc[-1])
+    atr_val    = atr(m15, 14)
+    sl_dist    = round(atr_val * 0.7, DIGITS)
+
+    sl = round(last_price - sl_dist, DIGITS) if trend == "BUY" else round(last_price + sl_dist, DIGITS)
+
+    # ── TP: swing levellardan ─────────────────────────────────────────────────
+    h1_highs = swing_highs(h1, n=3)
+    h1_lows  = swing_lows(h1,  n=3)
+    h4_highs = swing_highs(h4, n=3)
+    h4_lows  = swing_lows(h4,  n=3)
+
+    if trend == "BUY":
+        tp1 = next_level_above(h1_highs, last_price)
+        tp2 = next_level_above(h4_highs, last_price)
+        h4_above = sorted([l for l in h4_highs if l > last_price * 1.0005])
+        tp3 = h4_above[1] if len(h4_above) >= 2 else None
 
         if tp1 is None: tp1 = round(last_price + atr_val * 2.0, DIGITS)
         if tp2 is None: tp2 = round(last_price + atr_val * 3.0, DIGITS)
         if tp3 is None: tp3 = round(last_price + atr_val * 4.0, DIGITS)
 
         tp1, tp2, tp3 = sorted([tp1, tp2, tp3])
-
     else:
-        tp1 = next_level_below(lows, last_price)
-        tp2_candidates = sorted([l for l in lows if l < last_price * 0.9995], reverse=True)
-        tp2 = tp2_candidates[1] if len(tp2_candidates) >= 2 else None
-        tp3 = tp2_candidates[2] if len(tp2_candidates) >= 3 else None
+        tp1 = next_level_below(h1_lows, last_price)
+        tp2 = next_level_below(h4_lows, last_price)
+        h4_below = sorted([l for l in h4_lows if l < last_price * 0.9995], reverse=True)
+        tp3 = h4_below[1] if len(h4_below) >= 2 else None
 
         if tp1 is None: tp1 = round(last_price - atr_val * 2.0, DIGITS)
         if tp2 is None: tp2 = round(last_price - atr_val * 3.0, DIGITS)
@@ -208,19 +256,20 @@ def analyze(symbol: str) -> str:
     def rr(tp):
         return round(abs(tp - last_price) / sl_dist, 1) if sl_dist > 0 else 0
 
-    # MACD histogram (qo'shimcha ma'lumot)
-    hist_val = float(macd_hist(df["close"]).iloc[-1])
-
-    emoji  = "📈" if signal == "BUY" else "📉"
+    emoji = "📈" if trend == "BUY" else "📉"
+    tr_txt = "Uptrend" if trend == "BUY" else "Downtrend"
 
     return (
-        f"{emoji} *{symbol} — {signal}*\n\n"
+        f"{emoji} *{symbol} — {trend}*\n\n"
         f"💰 Entry:  `{last_price:.{DIGITS}f}`\n"
         f"🎯 TP1:   `{tp1:.{DIGITS}f}`  (1:{rr(tp1)}R)\n"
         f"🎯 TP2:   `{tp2:.{DIGITS}f}`  (1:{rr(tp2)}R)\n"
         f"🎯 TP3:   `{tp3:.{DIGITS}f}`  (1:{rr(tp3)}R)\n"
         f"🛑 SL:    `{sl:.{DIGITS}f}`  (0.7×ATR: {atr_val:.{DIGITS}f})\n\n"
-        f"RSI: {last_rsi:.2f} | MACD line: {macd_line:.2f} | MACD hist: {hist_val:.4f}\n"
+        f"✅ H4 {tr_txt}\n"
+        f"✅ H1 narx EMA50 {'ustida' if trend == 'BUY' else 'ostida'}\n"
+        f"✅ {entry_tf} EMA9/21 kesdi\n"
+        f"✅ MACD hist: {h_now:.4f}\n"
         f"⚠️ Risk: 1-2%"
     )
 
