@@ -3,7 +3,8 @@ bot.py — XAU/USD Sniper Scalping Bot
 ======================================
 Tahlil:  H4 (trend) + H1 (zona)
 Entry:   M15 + M5 (EMA9/21 crossover)
-Signal:  EMA9/21 + RSI + MACD line
+Filter:  RSI zona + Engulfing/Pin Bar
+MACD:    Histogram tasdiqi
 SL:      0.7 × ATR (M15)
 TP1:     H1 swing high/low
 TP2:     H4 swing high/low
@@ -25,30 +26,14 @@ DIGITS = 2
 # Indikatorlar
 # =========================
 
-def ema_list(values: list, period: int) -> list:
-    """JS dagi EMA logikasi (list)."""
-    k = 2 / (period + 1)
-    result = [values[0]]
-    for i in range(1, len(values)):
-        result.append(values[i] * k + result[i - 1] * (1 - k))
-    return result
-
 def ema(s: pd.Series, p: int) -> pd.Series:
-    """Pandas Series uchun EMA (swing/ATR uchun)."""
     return s.ewm(span=p, adjust=False).mean()
 
-def rsi(values: list, period: int = 14) -> float:
-    """JS dagi RSI logikasi."""
-    gains, losses = [], []
-    for i in range(1, len(values)):
-        diff = values[i] - values[i - 1]
-        if diff > 0:
-            gains.append(diff)
-        else:
-            losses.append(abs(diff))
-    avg_gain = sum(gains[-period:]) / period
-    avg_loss = sum(losses[-period:]) / period or 1
-    rs = avg_gain / avg_loss
+def rsi(s: pd.Series, p: int = 14) -> pd.Series:
+    delta = s.diff()
+    gain  = delta.clip(lower=0).rolling(p).mean()
+    loss  = (-delta.clip(upper=0)).rolling(p).mean()
+    rs    = gain / loss.replace(0, 1e-10)
     return 100 - (100 / (1 + rs))
 
 def atr(df: pd.DataFrame, p: int = 14) -> float:
@@ -59,6 +44,39 @@ def atr(df: pd.DataFrame, p: int = 14) -> float:
     ], axis=1).max(axis=1)
     val = tr.rolling(p).mean().dropna()
     return float(val.iloc[-1]) if len(val) > 0 else 1.0
+
+def engulfing(df: pd.DataFrame, direction: str) -> bool:
+    """
+    Oxirgi 2 ta sham — engulfing pattern.
+    BUY: oldingi sham qizil, keyingisi yashil va uni yutib olgan
+    SELL: oldingi sham yashil, keyingisi qizil va uni yutib olgan
+    """
+    o1, c1 = df["open"].iloc[-2], df["close"].iloc[-2]
+    o2, c2 = df["open"].iloc[-1], df["close"].iloc[-1]
+    if direction == "BUY":
+        return c1 < o1 and c2 > o2 and c2 > o1 and o2 < c1
+    else:
+        return c1 > o1 and c2 < o2 and c2 < o1 and o2 > c1
+
+def pin_bar(df: pd.DataFrame, direction: str) -> bool:
+    """
+    Pin bar (hammer/shooting star).
+    BUY: pastki soya tananing 2x dan katta, yuqori soya kichik
+    SELL: yuqori soya tananing 2x dan katta, pastki soya kichik
+    """
+    o = df["open"].iloc[-1]
+    c = df["close"].iloc[-1]
+    h = df["high"].iloc[-1]
+    l = df["low"].iloc[-1]
+    body   = abs(c - o)
+    upper  = h - max(o, c)
+    lower  = min(o, c) - l
+    if body == 0:
+        return False
+    if direction == "BUY":
+        return lower >= body * 2 and upper <= body * 0.5
+    else:
+        return upper >= body * 2 and lower <= body * 0.5
 
 def swing_highs(df: pd.DataFrame, n: int = 3) -> list:
     levels = []
@@ -147,49 +165,119 @@ def analyze() -> dict | None:
         return None
     print(f"  Narx: {price}")
 
-    # ── H4: trend ma'lumotlari (swing TP uchun) ───────────────────────────────
+    # ── H4: asosiy trend ──────────────────────────────────────────────────────
     h4 = get_candles("4h", 250)
-    if h4 is None or len(h4) < 50:
+    if h4 is None or len(h4) < 200:
         print("  H4 yetarli emas")
         return None
 
-    # ── H1: swing TP1 uchun ───────────────────────────────────────────────────
+    e50_h4  = float(ema(h4["close"], 50).iloc[-1])
+    e200_h4 = float(ema(h4["close"], 200).iloc[-1])
+
+    if e50_h4 > e200_h4 * 1.001:
+        trend = "BUY"
+    elif e50_h4 < e200_h4 * 0.999:
+        trend = "SELL"
+    else:
+        print("  H4 trend aniq emas")
+        return None
+    print(f"  H4 trend: {trend}")
+
+    # ── H1: zona tasdiqi ──────────────────────────────────────────────────────
     h1 = get_candles("1h", 100)
     if h1 is None or len(h1) < 50:
         print("  H1 yetarli emas")
         return None
 
-    # ── M15: asosiy signal hisoblash ──────────────────────────────────────────
-    m15 = get_candles("15min", 100)
-    if m15 is None or len(m15) < 30:
+    e50_h1   = float(ema(h1["close"], 50).iloc[-1])
+    price_h1 = float(h1["close"].iloc[-1])
+
+    if trend == "BUY"  and price_h1 < e50_h1:
+        print("  H1: narx EMA50 ostida — BUY o'tkazildi")
+        return None
+    if trend == "SELL" and price_h1 > e50_h1:
+        print("  H1: narx EMA50 ustida — SELL o'tkazildi")
+        return None
+
+    # ── M15: entry ────────────────────────────────────────────────────────────
+    m15 = get_candles("15min", 60)
+    if m15 is None or len(m15) < 40:
         print("  M15 yetarli emas")
         return None
 
-    close_prices = m15["close"].tolist()
-    last_price   = close_prices[-1]
+    e9_m15  = ema(m15["close"], 9)
+    e21_m15 = ema(m15["close"], 21)
 
-    # EMA9 / EMA21
-    e9  = ema_list(close_prices, 9)
-    e21 = ema_list(close_prices, 21)
-    last_ema9  = e9[-1]
-    last_ema21 = e21[-1]
+    cross_up_m15 = any(
+        e9_m15.iloc[i-1] < e21_m15.iloc[i-1] and e9_m15.iloc[i] >= e21_m15.iloc[i]
+        for i in range(-5, 0)
+    )
+    cross_down_m15 = any(
+        e9_m15.iloc[i-1] > e21_m15.iloc[i-1] and e9_m15.iloc[i] <= e21_m15.iloc[i]
+        for i in range(-5, 0)
+    )
 
-    # RSI
-    last_rsi = rsi(close_prices)
-
-    # MACD line
-    e12       = ema_list(close_prices, 12)
-    e26       = ema_list(close_prices, 26)
-    macd_line = e12[-1] - e26[-1]
-
-    # ── Signal sharti (JS kodidan aynan) ──────────────────────────────────────
-    if last_ema9 > last_ema21 and last_rsi < 70 and macd_line > 0:
-        trend = "BUY"
-    elif last_ema9 < last_ema21 and last_rsi > 30 and macd_line < 0:
-        trend = "SELL"
-    else:
-        print(f"  Signal yo'q | RSI:{last_rsi:.1f} MACD:{macd_line:.2f}")
+    # ── M5: sniper entry ──────────────────────────────────────────────────────
+    m5 = get_candles("5min", 60)
+    if m5 is None or len(m5) < 30:
+        print("  M5 yetarli emas")
         return None
+
+    e9_m5  = ema(m5["close"], 9)
+    e21_m5 = ema(m5["close"], 21)
+
+    cross_up_m5 = any(
+        e9_m5.iloc[i-1] < e21_m5.iloc[i-1] and e9_m5.iloc[i] >= e21_m5.iloc[i]
+        for i in range(-4, 0)
+    )
+    cross_down_m5 = any(
+        e9_m5.iloc[i-1] > e21_m5.iloc[i-1] and e9_m5.iloc[i] <= e21_m5.iloc[i]
+        for i in range(-4, 0)
+    )
+
+    m15_ok = cross_up_m15 if trend == "BUY" else cross_down_m15
+    m5_ok  = cross_up_m5  if trend == "BUY" else cross_down_m5
+
+    if not m15_ok and not m5_ok:
+        print("  M15 va M5 cross yo'q")
+        return None
+
+    entry_tf = "M15" if m15_ok else "M5"
+    entry_df = m15 if m15_ok else m5
+
+    # ── RSI filtri (M15) ──────────────────────────────────────────────────────
+    rsi_val = float(rsi(m15["close"]).iloc[-1])
+    if trend == "BUY"  and rsi_val > 65:
+        print(f"  RSI overbought: {rsi_val:.1f} — BUY o'tkazildi")
+        return None
+    if trend == "SELL" and rsi_val < 35:
+        print(f"  RSI oversold: {rsi_val:.1f} — SELL o'tkazildi")
+        return None
+    print(f"  RSI: {rsi_val:.1f} ✓")
+
+    # ── Candle pattern tasdiqi (entry_df) ─────────────────────────────────────
+    eng = engulfing(entry_df, trend)
+    pin = pin_bar(entry_df, trend)
+    if not eng and not pin:
+        print("  Candle pattern yo'q (engulfing/pin bar)")
+        return None
+    pattern = "Engulfing" if eng else "Pin Bar"
+    print(f"  Pattern: {pattern} ✓")
+
+    # ── MACD histogram tasdiqi (M15) ──────────────────────────────────────────
+    macd_s = ema(m15["close"], 12) - ema(m15["close"], 26)
+    hist   = macd_s - ema(macd_s, 9)
+    h_now  = float(hist.iloc[-1])
+    h_prv  = float(hist.iloc[-2])
+
+    if trend == "BUY"  and not (h_now > 0 or h_now > h_prv):
+        print("  MACD BUY tasdiqlamadi")
+        return None
+    if trend == "SELL" and not (h_now < 0 or h_now < h_prv):
+        print("  MACD SELL tasdiqlamadi")
+        return None
+
+    last_price = float(m15["close"].iloc[-1])
 
     # ── ATR → SL ──────────────────────────────────────────────────────────────
     atr_val = atr(m15, 14)
@@ -245,8 +333,10 @@ def analyze() -> dict | None:
         "rr2":      rr(tp2),
         "rr3":      rr(tp3),
         "atr":      round(atr_val, DIGITS),
-        "rsi":      round(last_rsi, 2),
-        "macd":     round(macd_line, 2),
+        "entry_tf": entry_tf,
+        "pattern":  pattern,
+        "rsi":      round(rsi_val, 1),
+        "macd":     round(h_now, 4),
     }
 
 # =========================
@@ -267,9 +357,11 @@ def format_msg(s: dict) -> str:
         f"🎯 TP2:   <b>{s['tp2']:.2f}</b>  (1:{s['rr2']}R)\n"
         f"🎯 TP3:   <b>{s['tp3']:.2f}</b>  (1:{s['rr3']}R)\n"
         f"🛑 SL:    <b>{s['sl']:.2f}</b>  (0.7×ATR: {s['atr']})\n\n"
-        f"✅ {tr}\n"
-        f"✅ EMA9/21 kesishdi\n"
-        f"✅ RSI: {s['rsi']} | MACD: {s['macd']}\n\n"
+        f"✅ H4 {tr}\n"
+        f"✅ H1 narx EMA50 {'ustida' if s['action']=='BUY' else 'ostida'}\n"
+        f"✅ {s['entry_tf']} EMA9/21 kesdi\n"
+        f"✅ RSI: {s['rsi']} | MACD: {s['macd']}\n"
+        f"✅ Pattern: {s['pattern']}\n\n"
         f"⏰ {now}\n"
         f"⚠️ Risk: 1-2%"
     )
@@ -300,7 +392,7 @@ def main():
                 f"\n✓ {res['action']} | "
                 f"Entry:{res['price']} | "
                 f"TP1:{res['tp1']} TP2:{res['tp2']} TP3:{res['tp3']} | "
-                f"SL:{res['sl']}"
+                f"SL:{res['sl']} | {res['pattern']}"
             )
             send(format_msg(res))
         else:
