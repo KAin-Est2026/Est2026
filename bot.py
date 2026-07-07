@@ -46,11 +46,6 @@ def atr(df: pd.DataFrame, p: int = 14) -> float:
     return float(val.iloc[-1]) if len(val) > 0 else 1.0
 
 def engulfing(df: pd.DataFrame, direction: str) -> bool:
-    """
-    Oxirgi 2 ta sham — engulfing pattern.
-    BUY: oldingi sham qizil, keyingisi yashil va uni yutib olgan
-    SELL: oldingi sham yashil, keyingisi qizil va uni yutib olgan
-    """
     o1, c1 = df["open"].iloc[-2], df["close"].iloc[-2]
     o2, c2 = df["open"].iloc[-1], df["close"].iloc[-1]
     if direction == "BUY":
@@ -59,18 +54,13 @@ def engulfing(df: pd.DataFrame, direction: str) -> bool:
         return c1 > o1 and c2 < o2 and c2 < o1 and o2 > c1
 
 def pin_bar(df: pd.DataFrame, direction: str) -> bool:
-    """
-    Pin bar (hammer/shooting star).
-    BUY: pastki soya tananing 2x dan katta, yuqori soya kichik
-    SELL: yuqori soya tananing 2x dan katta, pastki soya kichik
-    """
     o = df["open"].iloc[-1]
     c = df["close"].iloc[-1]
     h = df["high"].iloc[-1]
     l = df["low"].iloc[-1]
-    body   = abs(c - o)
-    upper  = h - max(o, c)
-    lower  = min(o, c) - l
+    body  = abs(c - o)
+    upper = h - max(o, c)
+    lower = min(o, c) - l
     if body == 0:
         return False
     if direction == "BUY":
@@ -255,7 +245,7 @@ def analyze() -> dict | None:
         return None
     print(f"  RSI: {rsi_val:.1f} ✓")
 
-    # ── Candle pattern tasdiqi (entry_df) ─────────────────────────────────────
+    # ── Candle pattern tasdiqi ────────────────────────────────────────────────
     eng = engulfing(entry_df, trend)
     pin = pin_bar(entry_df, trend)
     if not eng and not pin:
