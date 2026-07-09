@@ -11,7 +11,10 @@ SL:      0.7 x ATR (M15)
 TP1:     H1 swing / Fib 1.272 dan yaqinrog'i (min ATR masofasi bilan)
 TP2:     H4 swing / Fib 1.618 dan mantiqiyrog'i
 TP3:     H4 keyingi kuchli level (min ATR spacing bilan)
-Cron:    0 */4 * * * python3 bot.py
+Cron:    */15 * * * * python3 bot.py   (har 15 daqiqada — scalping uchun 4 soat juda kam)
+         MUHIM: M5/M15 crossoverni bot faqat oxirgi 20-25 daqiqalik oynada
+         qidiradi. Har 4 soatda ishga tushirilsa, bu oynadan tashqaridagi
+         deyarli barcha imkoniyatlar o'tkazib yuboriladi.
 
 MUHIM ESLATMA: Hech qanday texnik indikator kombinatsiyasi 96-99% aniqlik
 bera olmaydi. Bu versiya signal SIFATINI oshiradi (kamroq, lekin sifatli
@@ -522,12 +525,7 @@ def main():
                 }
                 save_state(state)
         else:
-            now = datetime.utcnow().strftime("%d.%m.%Y %H:%M UTC")
-            send(
-                f"📊 <b>XAU/USD — {now}</b>\n\n"
-                f"Signal yo'q (filtrlar o'tmadi).\n"
-                f"⏰ Keyingi tekshiruv 4 soatdan so'ng."
-            )
+            print("  Signal yo'q — Telegram'ga xabar yuborilmadi (jim turildi).")
     except Exception as e:
         print(f"XATO: {e}")
         import traceback; traceback.print_exc()
