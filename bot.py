@@ -140,7 +140,7 @@ def analyze() -> dict | None:
         print("  H4 yetarli emas")
         return None
 
-    e50_m15  = float(ema(m15["close"], 50).iloc[-1])
+    e50_h4  = float(ema(h4["close"], 50).iloc[-1])
     e200_h4 = float(ema(h4["close"], 200).iloc[-1])
     atr_h4  = atr(h4, 14)
 
@@ -149,9 +149,9 @@ def analyze() -> dict | None:
     # turlicha "qattiqlik" beradi va trendni tasodifiy rad etadi.
     buffer_h4 = atr_h4 * 0.15
 
-    if e50_h4 > e200_h4 + buffer_h4:
+    if e50_m15 > e200_h4 + buffer_h4:
         trend = "BUY"
-    elif e50_h4 < e200_h4 - buffer_h4:
+    elif e50_m15 < e200_h4 - buffer_h4:
         trend = "SELL"
     else:
         print(f"  H4 trend aniq emas (EMA50={e50_h4:.2f} EMA200={e200_h4:.2f} buffer={buffer_h4:.2f})")
