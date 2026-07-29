@@ -149,9 +149,9 @@ def analyze() -> dict | None:
     # turlicha "qattiqlik" beradi va trendni tasodifiy rad etadi.
     buffer_h4 = atr_h4 * 0.15
 
-    if e50_m15 > e200_h4 + buffer_h4:
+    if e50_h4 > e200_h4 + buffer_h4:
         trend = "BUY"
-    elif e50_m15 < e200_h4 - buffer_h4:
+    elif e50_h4 < e200_h4 - buffer_h4:
         trend = "SELL"
     else:
         print(f"  H4 trend aniq emas (EMA50={e50_h4:.2f} EMA200={e200_h4:.2f} buffer={buffer_h4:.2f})")
